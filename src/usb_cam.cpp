@@ -42,6 +42,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <malloc.h>
+#include <execinfo.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/time.h>
@@ -52,6 +53,7 @@
 
 extern "C" {
 #include <linux/videodev2.h>
+#include <libavutil/mem.h>
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
 }
@@ -99,6 +101,63 @@ static int xioctl(int fd, int request, void * arg)
 
   return r;
 }
+
+static char * reverse_fourcc(__u32 c, char * str)
+{
+  //v4l2_fourcc(a,b,c,d) (((__u32)(a)<<0)|((__u32)(b)<<8)|((__u32)(c)<<16)|((__u32)(d)<<24))
+  for (int i=0; i<4; i++)
+    str[i] = (((0xFF << (i*8)) & c) >> (i*8));
+  return str;
+}
+
+static void dump_format(struct v4l2_format *fmt)
+{
+  // http://linuxtv.org/downloads/v4l-dvb-apis/vidioc-g-fmt.html#v4l2-format
+  // type: http://linuxtv.org/downloads/v4l-dvb-apis/buffer.html#v4l2-buf-type
+  // pixelformat: http://www.fourcc.org/rgb.php
+  //    Image format identifier; a four character code as computed by the v4l2_fourcc() macro
+  // #define v4l2_fourcc(a,b,c,d) (((__u32)(a)<<0)|((__u32)(b)<<8)|((__u32)(c)<<16)|((__u32)(d)<<24))
+  // field: http://linuxtv.org/downloads/v4l-dvb-apis/field-order.html#v4l2-field
+  char str[5] = "xxxx";
+  // mini is in format YUYV
+  ROS_INFO("\n  type: %d,\n"
+           "    pix.width: %d\n"
+           "    pix.height: %d\n"
+           "    pix.pixelformat: 0x%X  %s\n"
+           "    pix.field: %d\n"
+           "    pix.bytesperline: %d\n",
+           fmt->type,
+           fmt->fmt.pix.width,
+           fmt->fmt.pix.height,
+           fmt->fmt.pix.pixelformat, reverse_fourcc(fmt->fmt.pix.pixelformat, str),
+           fmt->fmt.pix.field,
+           fmt->fmt.pix.bytesperline
+           );
+}
+
+static void dump_streamparm(struct v4l2_streamparm *parm)
+{
+  // http://linuxtv.org/downloads/v4l-dvb-apis/vidioc-g-parm.html#v4l2-captureparm
+  ROS_INFO("\n  type: %d,\n"
+           "    parm.capture.capability: %d\n"
+           "    parm.capture.capturemode: %d\n"
+           "    parm.capture.timeperframe.numerator: %d\n"
+           "    parm.capture.timeperframe.denominator: %d\n"
+           "    parm.capture.extendedmode: %d\n"
+           "    parm.capture.readbuffers: %d\n",
+           parm->type,
+           parm->parm.capture.capability, // V4l2_CAP_TIMEPERFRAME || 0 (boolean)
+           parm->parm.capture.capturemode, // V4L2_MODE_HIGHQUALITY || 0 (boolean)
+           parm->parm.capture.timeperframe.numerator,   // fraction
+           parm->parm.capture.timeperframe.denominator,  // fraction (fps here!)
+           parm->parm.capture.extendedmode, // driver specific, if set... see docs
+           parm->parm.capture.readbuffers   // num buffers
+           );
+}
+
+
+
+
 
 const unsigned char uchar_clipping_table[] = {
   0,0,0,0,0,0,0,0, // -128 - -121
@@ -292,8 +351,13 @@ static int init_mjpeg_decoder(int image_width, int image_height)
   }
 
   avcodec_context = avcodec_alloc_context3(avcodec);
+#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(55, 28, 1)
   avframe_camera = avcodec_alloc_frame();
   avframe_rgb = avcodec_alloc_frame();
+#else
+  avframe_camera = av_frame_alloc_();
+  avframe_rgb = av_frame_alloc();
+#endif
 
   avpicture_alloc((AVPicture *)avframe_rgb, PIX_FMT_RGB24, image_width, image_height);
 
@@ -329,7 +393,7 @@ mjpeg2rgb(char *MJPEG, int len, char *RGB, int NumPixels)
   int decoded_len;
   AVPacket avpkt;
   av_init_packet(&avpkt);
-  
+
   avpkt.size = len;
   avpkt.data = (unsigned char*)MJPEG;
   decoded_len = avcodec_decode_video2(avcodec_context, avframe_camera, &got_picture, &avpkt);
@@ -357,7 +421,7 @@ mjpeg2rgb(char *MJPEG, int len, char *RGB, int NumPixels)
 
   video_sws = sws_getContext( xsize, ysize, avcodec_context->pix_fmt, xsize, ysize, PIX_FMT_RGB24, SWS_BILINEAR, NULL, NULL, NULL);
   sws_scale(video_sws, avframe_camera->data, avframe_camera->linesize, 0, ysize, avframe_rgb->data, avframe_rgb->linesize );
-  sws_freeContext(video_sws);  
+  sws_freeContext(video_sws);
 
   int size = avpicture_layout((AVPicture *) avframe_rgb, PIX_FMT_RGB24, xsize, ysize, (uint8_t *)RGB, avframe_rgb_size);
   if (size != avframe_rgb_size) {
@@ -757,14 +821,22 @@ static void init_device(int image_width, int image_height, int framerate)
 //  fmt.fmt.pix.field = V4L2_FIELD_INTERLACED;
 
   fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+  if (-1==xioctl(fd, VIDIOC_G_FMT, &fmt))
+    errno_exit("VIDIOC_G_FMT");
+  //dump_format(&fmt);
+
   fmt.fmt.pix.width = image_width;
   fmt.fmt.pix.height = image_height;
   fmt.fmt.pix.pixelformat = pixelformat;
   fmt.fmt.pix.field = V4L2_FIELD_INTERLACED;
 
-
-  if (-1==xioctl(fd, VIDIOC_S_FMT, &fmt))
+  if (-1==xioctl(fd, VIDIOC_S_FMT, &fmt)) {
+    if (EINVAL==errno)
+      ROS_ERROR("Invalid 'pixel_format', 'width', and/or 'height' setting");
+    //dump_format(&fmt);
     errno_exit("VIDIOC_S_FMT");
+  }
 
   /* Note VIDIOC_S_FMT may change width and height. */
 
@@ -780,15 +852,25 @@ static void init_device(int image_width, int image_height, int framerate)
   image_height = fmt.fmt.pix.height;
 
   struct v4l2_streamparm stream_params;
-  memset(&stream_params, 0, sizeof(stream_params));
+
+  CLEAR(stream_params);
   stream_params.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
   if(xioctl(fd, VIDIOC_G_PARM, &stream_params) < 0) {
     errno_exit("Couldn't query v4l fps!\n");
   }
-  stream_params.parm.capture.timeperframe.numerator = 1;
-  stream_params.parm.capture.timeperframe.denominator = framerate;
-  if (xioctl(fd, VIDIOC_S_PARM, &stream_params) < 0) {
-    errno_exit("Couldn't set camera framerate\n");
+  //dump_streamparm(&stream_params);
+
+  if (V4L2_CAP_TIMEPERFRAME==stream_params.parm.capture.capability) {
+    stream_params.parm.capture.timeperframe.numerator = 1;
+    stream_params.parm.capture.timeperframe.denominator = framerate;
+    if (xioctl(fd, VIDIOC_S_PARM, &stream_params) < 0) {
+      errno_exit("Couldn't set camera framerate\n");
+    }
+  } else {
+    // TODO: stop lying when numerator != 1
+    ROS_INFO("Device does not support setting frame rate, using device default %d fps",
+             stream_params.parm.capture.timeperframe.denominator);
   }
 
   switch (io) {
@@ -882,6 +964,7 @@ void usb_cam_camera_shutdown(void)
   uninit_device();
   close_device();
 
+#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(55, 28, 1)
   if (avcodec_context) {
     avcodec_close(avcodec_context);
     av_free(avcodec_context);
@@ -893,6 +976,16 @@ void usb_cam_camera_shutdown(void)
   if (avframe_rgb)
     av_free(avframe_rgb);
   avframe_rgb = NULL;
+#else
+  if (avcodec_context) {
+    avcodec_close(avcodec_context);
+    av_freep(&avcodec_context);
+  }
+  if (avframe_camera)
+    av_frame_free(&avframe_camera);
+  if (avframe_rgb)
+    av_frame_free(&avframe_rgb);
+#endif
 }
 
 void usb_cam_camera_grab_image(usb_cam_camera_image_t *image)
@@ -940,11 +1033,11 @@ void usb_cam_camera_set_auto_focus(int value)
       perror("VIDIOC_QUERYCTRL");
       return;
     } else {
-      ROS_INFO("V4L2_CID_FOCUS_AUTO is not supported\n");
+      ROS_INFO("V4L2_CID_FOCUS_AUTO is not supported");
       return;
     }
   } else if (queryctrl.flags & V4L2_CTRL_FLAG_DISABLED) {
-    ROS_INFO("V4L2_CID_FOCUS_AUTO is not supported\n");
+    ROS_INFO("V4L2_CID_FOCUS_AUTO is not supported");
     return;
   } else {
     memset(&control, 0, sizeof(control));

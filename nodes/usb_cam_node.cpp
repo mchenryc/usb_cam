@@ -90,11 +90,11 @@ public:
 
     ROS_INFO("Camera name: %s", camera_name_.c_str());
     ROS_INFO("Camera info url: %s", camera_info_url_.c_str());
-    ROS_INFO("usb_cam video_device set to [%s]\n", video_device_name_.c_str());
-    ROS_INFO("usb_cam io_method set to [%s]\n", io_method_name_.c_str());
-    ROS_INFO("usb_cam image_width set to [%d]\n", image_width_);
-    ROS_INFO("usb_cam image_height set to [%d]\n", image_height_);
-    ROS_INFO("usb_cam pixel_format set to [%s]\n", pixel_format_name_.c_str());
+    ROS_INFO("usb_cam video_device set to [%s]", video_device_name_.c_str());
+    ROS_INFO("usb_cam io_method set to [%s]", io_method_name_.c_str());
+    ROS_INFO("usb_cam image_width set to [%d]", image_width_);
+    ROS_INFO("usb_cam image_height set to [%d]", image_height_);
+    ROS_INFO("usb_cam pixel_format set to [%s]", pixel_format_name_.c_str());
     ROS_INFO("usb_cam auto_focus set to [%d]\n", autofocus_);
 
     usb_cam_io_method io_method;
